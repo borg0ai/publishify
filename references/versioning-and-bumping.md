@@ -50,57 +50,49 @@ For this flow, inspect the actual release tool and encode these trigger boundari
 
 Make promotion creation idempotent: use `gh pr list --head develop --base main` or the GitHub API to find and reuse the existing PR. If no release is pending, do not open a promotion PR. If version comparison cannot prove a bump, fail closed and report why.
 
-The version and promotion jobs need narrowly scoped write permissions. A job that opens PRs needs `pull-requests: write`; a tool that pushes a release branch or commits version files also needs `contents: write`. Check whether repository Actions settings allow workflow-created PRs. Events created with the repository's `GITHUB_TOKEN` do not normally start another workflow run; `pull_request` runs caused by that token can remain approval-required. Use an approved GitHub App installation token or narrowly scoped PAT when PR checks must run automatically. Never expose either credential to fork PR jobs. See [GitHub's `GITHUB_TOKEN` event behavior](https://docs.github.com/en/actions/concepts/security/github_token).
+The version and promotion jobs need narrowly scoped write permissions. A job that opens PRs needs `pull-requests: write`; a tool that pushes a release branch or commits version files also needs `contents: write`. Check whether repository Actions settings allow workflow-created PRs. Events created with the repository's `GITHUB_TOKEN` do not normally start another workflow run; `pull_request` runs caused by that token can remain approval-required. Use a fine-grained PAT when generated PRs must trigger normal CI automatically. Never expose the PAT to fork PR jobs. See [GitHub's `GITHUB_TOKEN` event behavior](https://docs.github.com/en/actions/concepts/security/github_token).
 
 ### Set up a bot credential
 
-Prefer a GitHub App for a durable repository bot. Reuse an existing App only if its owner can install it on this repository and grant the needed permissions. Otherwise, create one. A fine-grained PAT is a simpler fallback for an individual maintainer, but it expires and is tied to that person's account.
+#### Fine-grained PAT setup
 
-#### Recommended: GitHub App
-
-1. Open the account or organization that owns the repository. Go to **Settings → Developer settings → GitHub Apps → New GitHub App**. Follow [GitHub's App creation guide](https://docs.github.com/en/apps/creating-github-apps/setting-up-a-github-app/creating-a-github-app).
-2. Give the App a clear bot name. It does not need webhook events for this workflow-token use. Set **Repository permissions** to **Metadata: Read-only** (required), **Pull requests: Read and write**, and **Contents: Read and write** only if the version tool pushes branches or commits version files. Do not grant Administration, Actions, or organization permissions for this flow.
-3. Create the App, generate a private key, and install the App on the repository owner account. Select only the repository being released. An organization may require an organization owner to approve installation or permission changes.
-4. In repository **Settings → Secrets and variables → Actions**, add repository variable `APP_CLIENT_ID` using the App's Client ID and repository secret `APP_PRIVATE_KEY` using the downloaded `.pem` private key. Never commit or print the private key.
-5. In each trusted version/promotion job, create a short-lived installation token and pass it explicitly to the PR-creating tool. Installation tokens expire after one hour. The token action supports repository scoping and explicit permissions; see [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token).
-
-Example token step and tool wiring:
-
-```yaml
-permissions:
-  contents: read
-
-steps:
-  - uses: actions/create-github-app-token@v3
-    id: bot-token
-    with:
-      client-id: ${{ vars.APP_CLIENT_ID }}
-      private-key: ${{ secrets.APP_PRIVATE_KEY }}
-      permission-pull-requests: write
-      # Keep this only if tool must push a release branch or commit files.
-      permission-contents: write
-
-  # Release Please: pass token: ${{ steps.bot-token.outputs.token }}
-  # Changesets action: pass github-token: ${{ steps.bot-token.outputs.token }}
-  # gh CLI: set GH_TOKEN to ${{ steps.bot-token.outputs.token }} for this step.
-```
-
-Keep the App private key in a trusted workflow that runs after code is merged to `develop` or `main`. Do not add it to `pull_request` workflows, especially workflows that run fork code. If the App cannot be created or installed, ask a repository owner to do that step; do not weaken permissions or put a private key in workflow YAML.
-
-#### Alternative: fine-grained PAT
+Use a fine-grained PAT owned by a maintainer who can access the repository. This is the only bot-token setup Publishify recommends. The token expires and remains tied to its owner's account, so record its renewal date. If organization policy blocks PATs, stop and ask the owner to resolve policy; do not substitute another credential type.
 
 1. Have the maintainer who will own the automation open **GitHub Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**. See [GitHub's fine-grained PAT guide](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
 2. Set **Resource owner** to the repository owner, **Repository access** to **Only select repositories**, and select this repository. Choose an expiration date the maintainer can renew.
 3. Grant **Pull requests: Read and write**. Grant **Contents: Read and write** only if the release tool pushes branches or commits version files. Do not grant Administration or unrelated repository access.
 4. Save the token immediately as repository secret `RELEASE_BOT_TOKEN`. GitHub will not show it again. Pass `${{ secrets.RELEASE_BOT_TOKEN }}` through the tool's documented token input or `GH_TOKEN` environment variable. Never print it.
 
-PAT automation stops when token expires or its owner loses access. For organization repositories, organization policy may block PATs or require approval; use an approved GitHub App instead.
+Store this as a repository secret under **Settings → Secrets and variables → Actions**, named `RELEASE_BOT_TOKEN`. Pass it to the selected tool using that tool's documented input:
+
+```yaml
+# Release Please step
+with:
+  token: ${{ secrets.RELEASE_BOT_TOKEN }}
+```
+
+```yaml
+# Changesets action step
+with:
+  github-token: ${{ secrets.RELEASE_BOT_TOKEN }}
+```
+
+```yaml
+# gh CLI step
+env:
+  GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+run: gh pr create --head develop --base main --title "Promote develop to main" --body "Automated promotion"
+```
+
+Do not put the PAT value in YAML, logs, artifacts, or fork-PR jobs. Keep workflow `permissions:` minimal; the PAT's repository permissions control API writes. If a tool uses `GITHUB_TOKEN` by default, explicitly pass `RELEASE_BOT_TOKEN` to its documented token input or it will keep using the default token.
+
+PAT automation stops when token expires or its owner loses repository access. For organization repositories, organization policy may block PATs or require approval; ask an organization owner to approve the fine-grained token.
 
 #### Verify bot PR checks
 
 After wiring the token, make a safe test PR or wait for the next generated PR. Confirm the bot PR has the expected head/base branches, Actions starts the normal `pull_request` CI checks without an approval-required state, and `gh pr checks <number>` reports required checks. Also inspect workflow permissions and logs to ensure no credential value is printed. A token step succeeding is not proof that branch protection checks ran.
 
-Release tools differ. Configure version-PR mode on `develop` without production publication (for example, verify Release Please's [`target-branch` and `skip-github-release`](https://github.com/googleapis/release-please-action) behavior in its current docs). Keep actual tags and GitHub Releases in the trusted `main` pipeline. For Changesets, verify [`pr-base-branch` and version/publish modes](https://github.com/changesets/action). Do not copy these settings blindly into another tool.
+Release tools differ. Configure version-PR mode on `develop` without production publication (for example, verify Release Please's [`target-branch` and `skip-github-release`](https://github.com/googleapis/release-please-action) behavior in its current docs). Keep actual tags and GitHub Releases in the trusted `main` pipeline. For Changesets, verify [`pr-base-branch` and version/publish modes](https://github.com/changesets/action). Explicitly pass `RELEASE_BOT_TOKEN` using the tool's documented token input. Do not copy settings blindly into another tool.
 
 These are default boundaries, not a mandate to replace a working release tool. If the current tool creates a release PR on another branch or targets `develop`, follow its verified configuration and document how that fits the branch policy.
 

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "skillId": "publishify",
   "channel": "stable",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "source": {
     "repository": "https://github.com/borg0ai/publishify.git"
   },
