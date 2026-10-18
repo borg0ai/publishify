@@ -64,17 +64,53 @@ Official Apple guides: [Developer ID certificates](https://developer.apple.com/h
 3. Open that environment's **Environment secrets** → **Add secret**. Add each secret using the exact names discovered in step 1. Put signing credentials and notarization credentials at environment scope where possible. Put non-sensitive identifiers in environment variables if the framework supports that; never commit `.p12`, `.p8`, app-specific passwords, or encoded forms to the repository.
 4. Ensure the macOS release job has `environment: <configured-name>` and only trusted release events can reach it. Pull-request jobs, including same-repository feature branches and forks, must not reference the environment or receive Apple secrets. Keep secret values out of command arguments where the framework offers safer environment/keychain input.
 
-Typical values (names are examples only; adapt to framework contract):
+GitHub secret names belong to the repository. They do not define framework environment-variable names. Choose clear storage names, then map them to the selected framework's documented runtime contract.
 
-| Example secret | Value |
+Example GitHub secret storage for Tauri v2:
+
+| GitHub secret name | Stored value |
 | --- | --- |
 | `APPLE_CERTIFICATE_BASE64` | Base64 encoding of password-protected `.p12` containing Developer ID identity and private key |
 | `APPLE_CERTIFICATE_PASSWORD` | Password used to export that `.p12` |
 | `APPLE_SIGNING_IDENTITY` | Exact Developer ID Application identity string from `security find-identity` |
 | `APPLE_TEAM_ID` | Apple Developer Team ID |
-| `APPLE_API_KEY` | Contents of downloaded `.p8` private-key file |
-| `APPLE_API_KEY_ID` | Key ID from App Store Connect |
-| `APPLE_API_ISSUER` | Issuer ID from App Store Connect |
+| `APPLE_NOTARY_KEY_ID` | Key ID from App Store Connect; identifier, not private-key contents |
+| `APPLE_NOTARY_PRIVATE_KEY` | Contents of downloaded `.p8` private-key file |
+| `APPLE_NOTARY_ISSUER_ID` | Issuer ID from App Store Connect |
+
+Map those GitHub secrets to Tauri v2 runtime inputs:
+
+| Tauri runtime input | Source |
+| --- | --- |
+| `APPLE_CERTIFICATE` | `APPLE_CERTIFICATE_BASE64` secret value |
+| `APPLE_CERTIFICATE_PASSWORD` | `APPLE_CERTIFICATE_PASSWORD` secret value |
+| `APPLE_SIGNING_IDENTITY` | `APPLE_SIGNING_IDENTITY` secret value |
+| `APPLE_API_KEY` | `APPLE_NOTARY_KEY_ID` secret value (Key ID) |
+| `APPLE_API_KEY_PATH` | Path to a temporary file containing `APPLE_NOTARY_PRIVATE_KEY` secret value |
+| `APPLE_API_ISSUER` | `APPLE_NOTARY_ISSUER_ID` secret value |
+
+In the trusted macOS release job, write the private key to a restricted temporary file, then run authentication preflight before building release assets. Example step:
+
+```yaml
+- name: Authenticate and build macOS release
+  env:
+    APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+    APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+    APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+    APPLE_API_KEY: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+    APPLE_API_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+    APPLE_NOTARY_PRIVATE_KEY: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY }}
+  run: |
+    set -eu
+    key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+    umask 077
+    printf '%s' "$APPLE_NOTARY_PRIVATE_KEY" > "$key_path"
+    trap 'rm -f "$key_path"' EXIT
+    xcrun notarytool history --key "$key_path" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" >/dev/null
+    APPLE_API_KEY_PATH="$key_path" pnpm tauri build --bundles dmg
+```
+
+This mapping follows [Tauri v2 macOS signing and notarization documentation](https://v2.tauri.app/distribute/sign/macos/). Other frameworks may require different runtime names or file formats; follow their current official documentation. Never assume a GitHub secret named `APPLE_API_KEY` must contain private-key contents.
 
 Only add the API-key trio **or** the documented Apple ID/app-specific-password inputs needed by the chosen auth method. Avoid duplicate credentials. If a workflow needs a base64 value, generate it locally and paste directly into GitHub's secret form; never print it into CI logs or commit it. For example, on macOS: `base64 -i DeveloperID.p12 | tr -d '\n'`.
 
