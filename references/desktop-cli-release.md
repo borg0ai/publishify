@@ -32,6 +32,60 @@ Never infer that a framework supports macOS, Linux, Windows, or a specific archi
 - **Windows**: publish project-supported installer/archive (for example MSI, NSIS/EXE, or ZIP). Verify Windows signing if product promises trusted publisher identity. Verify update metadata and permissions on a clean Windows runner/device.
 - Test fresh installation and upgrade from previous release separately for each supported OS/architecture. Verify checksums and signatures against downloaded release assets, not only CI outputs.
 
+## Guided Apple signing and notarization setup
+
+Use this procedure when a repository distributes a macOS app or CLI outside the Mac App Store and needs Developer ID signing and notarization. Guide the repository owner from discovery through a verified release run. Do not stop at listing secret names or hand them a generic secret checklist. Adapt the names, file conversion, runner, signing commands, and updater signing requirements to the repository's actual framework and workflow.
+
+### 1. Discover this repository's exact contract
+
+Before asking the owner to create credentials, inspect the app identifier, package format (DMG, PKG, ZIP, or app bundle), CI framework/version, macOS runner, release workflow, and its signing/notarization inputs. Read current official framework docs. Decide whether the output needs a **Developer ID Application** certificate (apps, binaries, DMGs) and whether a **Developer ID Installer** certificate is also needed (PKG installer signing). Identify whether notarization authenticates through an App Store Connect API key or Apple ID plus app-specific password. Prefer API-key authentication when the framework supports it, and use the framework's documented names and file format. Keep updater private keys separate from Apple credentials.
+
+Produce a repo-specific setup checklist that says, for every value: exact GitHub secret/variable name, what it contains, which Apple page supplies it, which job consumes it, and how the workflow validates it without printing it. Do not ask the owner to guess names. If an agent has permission to inspect GitHub, check environment and secret **names** with `gh`; GitHub never reveals saved secret values. If configuration is missing or agent lacks write permission, give exact UI steps and wait for the owner to add the values before claiming readiness.
+
+### 2. Create Apple Developer credentials
+
+Owner prerequisites: active Apple Developer Program membership, access to the correct team, and a trusted Mac for certificate/key generation and export.
+
+1. Find the **Team ID** in Apple Developer account membership details. Record it as an identifier, not a secret.
+2. Open [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/certificates/list). Select **Certificates** → **+** → **Developer ID** → **Developer ID Application**. Create a CSR on the trusted Mac with Keychain Access, upload it, and download the issued `.cer` file. Install it into the same macOS keychain that holds its matching private key. For PKG signing, repeat with **Developer ID Installer**.
+3. In Keychain Access → **My Certificates**, confirm the certificate expands to show its private key. Export the identity and private key as a password-protected `.p12`. The private key must be present; a `.cer` alone cannot sign. Check the installed identity with `security find-identity -v -p codesigning` and record the exact `Developer ID Application: ... (TEAMID)` identity string.
+4. In [App Store Connect](https://appstoreconnect.apple.com/) open **Users and Access** → **Integrations** → **App Store Connect API** → **Team Keys** and create a key with the minimum role Apple/framework documentation says can notarize. Download the `.p8` once; record the **Key ID** and **Issuer ID** shown there. Store `.p8` securely because Apple does not let you download that private key again. If the account or framework cannot use an API key, use Apple's documented Apple ID + app-specific password flow instead; do not store the normal Apple account password.
+
+Official Apple guides: [Developer ID certificates](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/), [App Store Connect API keys](https://developer.apple.com/documentation/appstoreconnectapi/creating-api-keys-for-app-store-connect-api), [notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow), and [app-specific passwords](https://support.apple.com/en-us/102654).
+
+### 3. Add credentials to a protected GitHub Environment
+
+1. In the target repository open **Settings** → **Environments** → **New environment**. Create the environment name used by the workflow (commonly `release` or `production`).
+2. Restrict deployment branches/tags to the actual trusted production branch or release tag pattern. Add required reviewers when the repository needs human approval before signing or publishing.
+3. Open that environment's **Environment secrets** → **Add secret**. Add each secret using the exact names discovered in step 1. Put signing credentials and notarization credentials at environment scope where possible. Put non-sensitive identifiers in environment variables if the framework supports that; never commit `.p12`, `.p8`, app-specific passwords, or encoded forms to the repository.
+4. Ensure the macOS release job has `environment: <configured-name>` and only trusted release events can reach it. Pull-request jobs, including same-repository feature branches and forks, must not reference the environment or receive Apple secrets. Keep secret values out of command arguments where the framework offers safer environment/keychain input.
+
+Typical values (names are examples only; adapt to framework contract):
+
+| Example secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE_BASE64` | Base64 encoding of password-protected `.p12` containing Developer ID identity and private key |
+| `APPLE_CERTIFICATE_PASSWORD` | Password used to export that `.p12` |
+| `APPLE_SIGNING_IDENTITY` | Exact Developer ID Application identity string from `security find-identity` |
+| `APPLE_TEAM_ID` | Apple Developer Team ID |
+| `APPLE_API_KEY` | Contents of downloaded `.p8` private-key file |
+| `APPLE_API_KEY_ID` | Key ID from App Store Connect |
+| `APPLE_API_ISSUER` | Issuer ID from App Store Connect |
+
+Only add the API-key trio **or** the documented Apple ID/app-specific-password inputs needed by the chosen auth method. Avoid duplicate credentials. If a workflow needs a base64 value, generate it locally and paste directly into GitHub's secret form; never print it into CI logs or commit it. For example, on macOS: `base64 -i DeveloperID.p12 | tr -d '\n'`.
+
+### 4. Add fail-closed preflight and prove readiness
+
+In the trusted macOS release job, before building publishable assets:
+
+1. Map GitHub secrets to the framework's required environment variables. Check every required variable is non-empty with a shell preflight that prints only missing **names**, never values. A successful `gh secret list` proves only that a name exists, not that its value is correct or accessible to this job.
+2. Import the `.p12` into a temporary keychain using the framework's supported action/commands; unlock only for the signing job and remove it afterward. Confirm the expected valid Developer ID identity and Team ID are present. Fail on missing private key, expired/revoked identity, wrong certificate type, or Team ID mismatch.
+3. Authenticate to Apple's notary service using the configured method (for API key, verify key file, key ID, issuer ID; for Apple ID, verify Apple ID, app-specific password, Team ID). Use `xcrun notarytool` or the framework's supported equivalent. Do not put credentials into logged command text. Confirm authentication before release assets can be published.
+4. Build and sign the actual release bundle. Verify signature with `codesign --verify --deep --strict --verbose=2` and inspect its designated requirement/Team ID. Submit the exact distributable package for notarization, wait for **Accepted**, staple where supported, then run `xcrun stapler validate` and `spctl -a -vv` on the distributed artifact. Fail the macOS release if any required stage fails; do not publish an unsigned/unnotarized macOS asset as though it were ready.
+5. Run a trusted release workflow and inspect its run/checks. A configured secret name or green PR validation does not prove release credentials work. Report separately: GitHub environment configured, credential preflight passed, signing passed, notarization accepted, staple/Gatekeeper checks passed, asset published.
+
+If Apple credentials are unavailable, continue only independent platform builds if repository policy allows. Mark macOS release as blocked and do not claim the release is complete or publish an unsigned macOS artifact.
+
 ## Homebrew and Buzz.app
 
 Homebrew package update and app self-update are separate mechanisms. Inspect the current tap repository and Buzz.app implementation to learn which package types, architectures, and OS targets Buzz can install. Never assume a formula or cask automatically means Buzz supports that artifact.
