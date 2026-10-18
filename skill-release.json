@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "skillId": "publishify",
+  "channel": "stable",
+  "version": "0.1.0",
+  "source": {
+    "repository": "https://github.com/borg0ai/publishify.git"
+  },
+  "updateManifestUrl": "https://borg0ai.github.io/publishify/skill-updates/publishify/stable.json"
+}
