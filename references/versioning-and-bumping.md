@@ -30,9 +30,29 @@ Respect the repository's policy for `0.x` versions; do not assume pre-1.0 projec
 For the common `feature → develop → main → release` flow:
 
 - Feature PRs into `develop` run full CI. They normally do not edit shipped version files or create release tags. Feed release automation through its required commit messages, labels, or changeset files instead.
-- The `develop → main` promotion is the release decision point. Validate the selected bump and its source against changes since the previous release. If the repository commits versions before release, put the generated/manual version and changelog update in the promotion/release PR. Require the promotion-source guard and full CI on that PR.
-- A tool may calculate the version only after changes reach `main`. In that case, do not force a version edit into the promotion PR; validate the tool's inputs on the PR, then let the trusted `main` release job calculate and write the version using that tool.
-- `main` release work uses the exact promoted commit and resulting version/tag. Do not tag a moving branch head or publish assets before the version is fixed.
+- A push to `develop` after feature merges runs the version tool. It calculates the next version from repository policy and opens or updates a version PR whose base is `develop`. The PR contains tool-generated version/changelog changes and passes normal `develop` checks.
+- Merge the version PR into `develop`. Configure this step to update version files only; it must not create a production tag, GitHub Release, sign artifacts, or publish packages.
+- After that merge, a promotion workflow compares the release version on `develop` with the version on `main` (or the last published version, as repository policy defines). If a release is pending, it opens or updates a PR with `head=develop` and `base=main`. Search for an existing PR with that head/base pair first so repeated pushes update one PR rather than create duplicates. This preserves a strict rule that only `develop` may be the source of a `main` PR.
+- The `develop → main` PR runs full CI, a source-branch/repository guard, and synchronized version/release-policy checks. Merge is the production release decision. Do not skip required review or branch protection to automate this flow.
+- A push to `main` after promotion triggers release work against that exact commit and version. Create the tag/release, build CLI and GUI artifacts, sign/notarize, and publish only after all required checks pass. Never tag a moving branch head or publish before the version is fixed.
+
+### Workflow trigger and token contract
+
+For this flow, inspect the actual release tool and encode these trigger boundaries explicitly:
+
+| Event | Required action | Must not happen |
+| --- | --- | --- |
+| `pull_request` targeting `develop` | Full PR CI; collect commit/changeset release input | Release tag or production publishing |
+| Push to `develop` | Calculate/update version PR targeting `develop` | Sign, notarize, or publish production assets |
+| Version PR merged into `develop` | Detect that `develop` version is ahead; create/update `develop → main` PR | Create production tag/release |
+| `pull_request` targeting `main` | Verify source is same-repo `develop`; full CI and version checks | Expose release secrets or publish |
+| Push to `main` or approved release tag | Build exact release commit, validate version, sign/notarize, publish assets | Build an ambiguous branch head or bypass failed gates |
+
+Make promotion creation idempotent: use `gh pr list --head develop --base main` or the GitHub API to find and reuse the existing PR. If no release is pending, do not open a promotion PR. If version comparison cannot prove a bump, fail closed and report why.
+
+The version and promotion jobs need narrowly scoped write permissions. A job that opens PRs needs `pull-requests: write`; a tool that commits version files may also need `contents: write`. Check whether repository Actions settings allow workflow-created PRs. Events created with the repository's `GITHUB_TOKEN` generally do not start another workflow run, so required CI may not run for a bot-created PR. Use an approved GitHub App installation token or narrowly scoped PAT when PR checks must trigger normally, or explicitly dispatch the required validation workflow and verify its result. Never put such credentials in fork PR jobs. See [GitHub's `GITHUB_TOKEN` event behavior](https://docs.github.com/en/actions/concepts/security/github_token).
+
+Release tools differ. Configure version-PR mode on `develop` without production publication (for example, verify Release Please's [`target-branch` and `skip-github-release`](https://github.com/googleapis/release-please-action) behavior in its current docs). Keep actual tags and GitHub Releases in the trusted `main` pipeline. For Changesets, verify [`pr-base-branch` and version/publish modes](https://github.com/changesets/action). Do not copy these settings blindly into another tool.
 
 These are default boundaries, not a mandate to replace a working release tool. If the current tool creates a release PR on another branch or targets `develop`, follow its verified configuration and document how that fits the branch policy.
 
