@@ -168,7 +168,25 @@ steps:
       manifest-file: .release-please-manifest.json
 ```
 
-Follow with a step that writes `steps.release.outputs.prs` to `$GITHUB_STEP_SUMMARY` when `prs_created` is `true`. Do not report "completed without opening a version pull request" as a plain no-op while a merged version PR is still `autorelease: pending`; that run is waiting for the production tag, not idle.
+Follow with a report step (`GH_TOKEN` set to the bot token). When `prs_created` is `true`, write `steps.release.outputs.prs` to `$GITHUB_STEP_SUMMARY`. Otherwise tell the wait apart from a real no-op, because `skip-github-release` makes Release Please abort while a merged version PR is still `autorelease: pending`:
+
+```bash
+merged_pending=$(gh pr list --repo "$GITHUB_REPOSITORY" --base develop --state merged \
+  --label "autorelease: pending" --json number --jq 'length')
+if [ "$merged_pending" -gt 0 ]; then
+  promotion=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main \
+    --head "$GITHUB_REPOSITORY_OWNER:develop" --state open --json url --jq '.[0].url // empty')
+  if [ -n "$promotion" ]; then
+    echo "No version PR: waiting for production tag after promotion ($promotion). No tag or release exists yet." | tee -a "$GITHUB_STEP_SUMMARY"
+  else
+    echo "::warning::Merged version PR is still pending and no promotion PR is open. Check the promote workflow."
+  fi
+else
+  echo "Release Please completed without opening or updating a version pull request."
+fi
+```
+
+Use `::warning::`, not a failure, for the missing-promotion case: the promote job runs on the same merge and may not have opened its PR yet.
 
 ### 4. Promote from the merged version PR
 
