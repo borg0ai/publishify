@@ -130,7 +130,7 @@ Apply when the repository uses Release Please. Build these pieces in order; a gr
 
 - Pin the action to an exact Release Please version and note it; every later check targets that version.
 - Set tag options (`include-v-in-tag`, `include-component-in-tag`, `tag-separator`) so manifest mode searches the repo's real tag form (for example `vX.Y.Z`). Keep `.release-please-manifest.json` equal to the latest published tag's version; never invent a bootstrap value.
-- On the development branch run version-PR mode only: target `develop`, `skip-github-release: true`. Tags and releases come from the `main` pipeline.
+- Use `"separate-pull-requests": false` for one version PR across packages, and `"include-component-in-tag": false` for plain `vX.Y.Z` tags. On the development branch run version-PR mode only: target `develop`, `skip-github-release: true`. Tags and releases come from the `main` pipeline.
 
 ### 2. Write TOML `extra-files` selectors for the pinned version
 
@@ -139,46 +139,58 @@ Apply when the repository uses Release Please. Build these pieces in order; a gr
 ```json
 { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.name.value=='my-crate')].version" }
 { "type": "toml", "path": "Cargo.toml", "jsonpath": "$.workspace.package.version" }
+{ "type": "toml", "path": "apps/desktop/src-tauri/Cargo.toml", "jsonpath": "$.package.version" }
 ```
 
 Confirm each path against the [v17.3.0 updater source](https://github.com/googleapis/release-please/blob/v17.3.0/src/updaters/generic-toml.ts) and [array-filter issue](https://github.com/googleapis/release-please/issues/2455). Prove it before merging: run the pinned updater (for example `release-please release-pr --dry-run`) or a script on representative files, and require every version field to change exactly once with valid TOML. If that cannot run locally, require the first hosted version PR diff to show every configured file updated.
 
-### 3. Add an outcome step that reports state
+### 3. Run version-PR mode on `develop` with a token guard
 
-The action's job status and `prs_created` output cannot tell a no-op from a wait or an abort. After the action step, query real state and write the summary:
-
-```yaml
-- name: Report version PR state
-  env: { GH_TOKEN: "${{ secrets.RELEASE_BOT_TOKEN }}" }
-  run: |
-    pending=$(gh pr list --state merged --base develop --label "autorelease: pending" --json number --jq length)
-    promo=$(gh pr list --head develop --base main --state open --json number --jq length)
-    if [ "${{ steps.rp.outputs.prs_created }}" = "true" ]; then
-      echo "Version PR created/updated." >> "$GITHUB_STEP_SUMMARY"
-    elif [ "$pending" -gt 0 ] && [ "$promo" -gt 0 ]; then
-      echo "No version PR: waiting for production tag after promotion. No tag/release exists yet." >> "$GITHUB_STEP_SUMMARY"
-    elif [ "$pending" -gt 0 ]; then
-      echo "::error::Merged release PR is untagged and no promotion PR is open."; exit 1
-    else
-      echo "No releasable commits." >> "$GITHUB_STEP_SUMMARY"
-    fi
-```
-
-Release Please aborts while a merged release PR still carries `autorelease: pending`; with tags deferred to `main` that is the expected wait, but only while a promotion PR is open. Any other combination must fail visibly, never hide behind a green job.
-
-### 4. Gate promotion on the merged version PR
+Fail fast when the bot token is missing; a `GITHUB_TOKEN`-created PR will not start CI.
 
 ```yaml
 on:
-  pull_request:
-    types: [closed]
-    branches: [develop]
-jobs:
-  promote:
-    if: github.event.pull_request.merged && contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
+  push: { branches: [develop] }
+permissions: { contents: write, pull-requests: write }
+concurrency: { group: "release-please-${{ github.ref }}", cancel-in-progress: false }
+steps:
+  - name: Require workflow-enabled GitHub token
+    env: { RELEASE_PLEASE_TOKEN: "${{ secrets.RELEASE_PLEASE_TOKEN }}" }
+    run: |
+      [ -n "$RELEASE_PLEASE_TOKEN" ] || { echo "::error::Configure repository secret RELEASE_PLEASE_TOKEN"; exit 1; }
+  - uses: googleapis/release-please-action@v4
+    id: release
+    with:
+      token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+      target-branch: develop
+      skip-github-release: true
+      config-file: release-please-config.json
+      manifest-file: .release-please-manifest.json
 ```
 
-Ordinary feature merges lack the label, so they never start a promotion runner. The job compares synchronized versions, then creates or reuses the `develop → main` PR (section 3 idempotency rule).
+Follow with a step that writes `steps.release.outputs.prs` to `$GITHUB_STEP_SUMMARY` when `prs_created` is `true`. Do not report "completed without opening a version pull request" as a plain no-op while a merged version PR is still `autorelease: pending`; that run is waiting for the production tag, not idle.
+
+### 4. Promote from the merged version PR
+
+```yaml
+on:
+  pull_request: { types: [closed], branches: [develop] }
+permissions: { contents: read, pull-requests: write }
+concurrency: { group: promote-develop-to-main, cancel-in-progress: false }
+jobs:
+  promote:
+    if: >-
+      github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
+```
+
+Steps, each with `GH_TOKEN` set to the bot token:
+
+1. Check out `develop` with `fetch-depth: 0`, run the repo's version-sync check, then compare the product version on `develop` with `origin/main`. Equal means no promotion.
+2. Stop while another open version PR on `develop` still carries `autorelease: pending`.
+3. Look for an open PR with `gh pr list --base main --head "$GITHUB_REPOSITORY_OWNER:develop" --state open`; reuse it, else `gh pr create --head develop --base main` with the version in the title.
+
+Ordinary feature merges lack the label, so they never start this job.
 
 ### 5. Retag the merged version PR after publishing
 
@@ -192,12 +204,16 @@ tag-release-pr:
     - env: { GH_TOKEN: "${{ github.token }}" }
       run: |
         set -o pipefail
-        gh label create "autorelease: tagged" --color EDEDED 2>/dev/null || true
-        gh pr list --base develop --state merged --label "autorelease: pending" --json number --jq '.[].number' |
-        while read -r n; do gh pr edit "$n" --remove-label "autorelease: pending" --add-label "autorelease: tagged"; done
+        gh label create "autorelease: tagged" --repo "$GITHUB_REPOSITORY" --color EDEDED 2>/dev/null || true
+        gh pr list --repo "$GITHUB_REPOSITORY" --base develop --state merged \
+          --label "autorelease: pending" --json number --jq '.[].number' |
+        while read -r n; do
+          gh pr edit "$n" --repo "$GITHUB_REPOSITORY" \
+            --remove-label "autorelease: pending" --add-label "autorelease: tagged"
+        done
 ```
 
-Keep it a separate job so its failure cannot block package-manager PRs or undo a published release. Gate it on a push event: a `workflow_dispatch` rebuild of an old tag must not tag a newer version PR still waiting for promotion. The default `run:` shell is `bash -e` without `pipefail`, so set it for any pipeline whose first command can fail.
+Pass `--repo "$GITHUB_REPOSITORY"` to every `gh` call so the job needs no checkout, and grant the workflow `pull-requests: write`. Keep it a separate job so its failure cannot block package-manager PRs or undo a published release. Gate it on a push event: a `workflow_dispatch` rebuild of an old tag must not tag a newer version PR still waiting for promotion. The default `run:` shell is `bash -e` without `pipefail`, so set it for any pipeline whose first command can fail.
 
 ### 6. Recover a failed release
 
