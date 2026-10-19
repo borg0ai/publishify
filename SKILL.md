@@ -3,7 +3,7 @@ name: publishify
 description: Design, refine, and review GitHub Actions CI/CD for repositories shipping CLI tools and desktop apps, including PR gates, signed cross-platform GitHub Releases, framework auto-updaters, and Homebrew/Buzz distribution. Use when changing .github/workflows build, verification, release, or package-manager pipelines.
 license: MIT
 metadata:
-  version: "0.1.8"
+  version: "0.1.9"
 ---
 
 # Publishify

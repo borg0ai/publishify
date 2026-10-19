@@ -180,9 +180,33 @@ jobs:
 
 Ordinary feature merges lack the label, so they never start a promotion runner. The job compares synchronized versions, then creates or reuses the `develop → main` PR (section 3 idempotency rule).
 
-### 5. Prove each stage separately
+### 5. Retag the merged version PR after publishing
+
+With `skip-github-release: true` Release Please never creates the tag or release, so it never replaces `autorelease: pending` with `autorelease: tagged` on its merged version PR. Every later run then aborts with `untagged, merged release PRs outstanding` and opens no further version PR. The `main` pipeline must do it: after `publish`, add a job of its own that creates the `autorelease: tagged` label if missing and relabels merged PRs with `autorelease: pending` whose base is the development branch.
+
+```yaml
+tag-release-pr:
+  needs: [prepare, publish]
+  if: needs.prepare.outputs.proceed == 'true' && github.event_name == 'push'
+  steps:
+    - env: { GH_TOKEN: "${{ github.token }}" }
+      run: |
+        set -o pipefail
+        gh label create "autorelease: tagged" --color EDEDED 2>/dev/null || true
+        gh pr list --base develop --state merged --label "autorelease: pending" --json number --jq '.[].number' |
+        while read -r n; do gh pr edit "$n" --remove-label "autorelease: pending" --add-label "autorelease: tagged"; done
+```
+
+Keep it a separate job so its failure cannot block package-manager PRs or undo a published release. Gate it on a push event: a `workflow_dispatch` rebuild of an old tag must not tag a newer version PR still waiting for promotion. The default `run:` shell is `bash -e` without `pipefail`, so set it for any pipeline whose first command can fail.
+
+### 6. Recover a failed release
+
+The release workflow pushes the tag before it builds. If it fails afterwards, the tag exists with no published release, and a re-run on `main` skips because the tag exists. Recover through the normal path: fix the workflow on the development branch, promote to `main` by PR, then `workflow_dispatch` with the existing tag so the build uses the original source. Rulesets that require PRs with no bypass actors, and a release environment limited to `main` and `v*` tags, are deliberate; do not weaken them or dispatch from another branch to get around them. The version PR stays `autorelease: pending` until the recovered release publishes, so Release Please keeps waiting; flip the label only after the release really exists.
+
+### 7. Prove each stage separately
 
 1. `develop` push → version PR with every version file updated.
 2. Merged version PR → promotion PR.
-3. `main` promotion → tag (clears the pending label), release, assets, signatures/notarization.
-4. Verified assets → automated tap PR (`desktop-cli-release.md`).
+3. `main` promotion → tag, release, assets, signatures/notarization.
+4. Published release → merged version PR relabelled `autorelease: tagged`; the next `develop` push opens or updates the next version PR.
+5. Verified assets → automated tap PR (`desktop-cli-release.md`).
