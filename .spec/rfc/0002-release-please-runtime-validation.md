@@ -4,7 +4,7 @@
 
 ## Summary
 
-Teach Publishify to make an agent write Release Please configuration and workflows that work on the first hosted run: tag options matching existing history, TOML selectors proven against the pinned updater, a workflow step that reports real release state, and a promotion job gated on the merged version PR. The guidance lives in `references/versioning-and-bumping.md` section 6, with a pointer from `SKILL.md`.
+Teach Publishify to make an agent write Release Please configuration and workflows that work on the first hosted run: tag options matching existing history, TOML selectors proven against the pinned updater, and a promotion job gated on the merged version PR. The guidance lives in `references/versioning-and-bumping.md` section 6, with a pointer from `SKILL.md`.
 
 ## Motivation
 
@@ -17,7 +17,6 @@ An agent following the skill builds a workflow that:
 - Uses tag options and a manifest version matching the repository's existing tags, with the action pinned to an exact Release Please version.
 - Runs version-PR mode only on the development branch (`skip-github-release`), leaving tags and releases to `main`.
 - Uses TOML `extra-files` selectors proven against the pinned updater, or marks the proof pending until the hosted version PR diff shows every file updated.
-- Includes a step after the action that queries PR state and writes the job summary: version PR created, waiting for production tag after promotion, or no releasable commits. It fails on a merged untagged release PR with no open promotion PR.
 - Starts promotion only from a merged version PR carrying the release label, and creates or reuses the `develop → main` PR idempotently.
 - Opens the Homebrew tap PR from an automated release-workflow job after assets and checksums are verified.
 
@@ -44,7 +43,7 @@ References: [GenericToml updater v17.3.0](https://github.com/googleapis/release-
 
 - Guidance tells the agent to pin the action, match tag options to existing tags, and run version-PR mode only on `develop`.
 - Guidance gives the v17.3.0 Cargo.lock and workspace selector shapes, marked version-specific, and requires an updater-level proof or hosted PR-diff proof.
-- Guidance includes the state-reporting step and requires an explicit failure for an unexplained abort.
+- Guidance adds no post-action reporting step and notes that an idle run is the expected wait while a merged version PR is still `autorelease: pending`.
 - Guidance gates promotion on a merged, labeled version PR so ordinary `develop` pushes start no promotion runner.
 - Guidance makes the tap PR an automated release-workflow job and keeps version PR, promotion PR, release, artifacts, and tap PR as separately proven stages.
 - RFC validation and `.spec` sync-check pass.

@@ -4,6 +4,8 @@
 
 - [ ] Implement RFC 0002: Guide agents to build Release Please workflows correctly (RFC 0002)
 - [ ] Implement RFC 0003: Cover Release Please retagging, failed-release recovery and Tauri updater outputs (RFC 0003)
+- [ ] Implement RFC 0004: Route release guidance by product type and language (RFC 0004)
+
 
 
 ## Done

@@ -46,7 +46,7 @@ For this flow, inspect the actual release tool and encode these trigger boundari
 | Push to `develop` | Calculate/update version PR targeting `develop` | Sign, notarize, or publish production assets |
 | Version PR merged into `develop` | Detect that `develop` version is ahead; create/update `develop → main` PR | Create production tag/release |
 | `pull_request` targeting `main` | Verify source is same-repo `develop`; full CI and version checks | Expose release secrets or publish |
-| Push to `main` or approved release tag | Build exact release commit, validate version, sign/notarize, publish assets | Build an ambiguous branch head or bypass failed gates |
+| Push to `main` | One release workflow (section 7): verify, build each product, publish tag and release | Build an ambiguous branch head or bypass failed gates |
 
 Make promotion creation idempotent: use `gh pr list --head develop --base main` or the GitHub API to find and reuse the existing PR. If no release is pending, do not open a promotion PR. If version comparison cannot prove a bump, fail closed and report why.
 
@@ -168,25 +168,7 @@ steps:
       manifest-file: .release-please-manifest.json
 ```
 
-Follow with a report step (`GH_TOKEN` set to the bot token). When `prs_created` is `true`, write `steps.release.outputs.prs` to `$GITHUB_STEP_SUMMARY`. Otherwise tell the wait apart from a real no-op, because `skip-github-release` makes Release Please abort while a merged version PR is still `autorelease: pending`:
-
-```bash
-merged_pending=$(gh pr list --repo "$GITHUB_REPOSITORY" --base develop --state merged \
-  --label "autorelease: pending" --json number --jq 'length')
-if [ "$merged_pending" -gt 0 ]; then
-  promotion=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main \
-    --head "$GITHUB_REPOSITORY_OWNER:develop" --state open --json url --jq '.[0].url // empty')
-  if [ -n "$promotion" ]; then
-    echo "No version PR: waiting for production tag after promotion ($promotion). No tag or release exists yet." | tee -a "$GITHUB_STEP_SUMMARY"
-  else
-    echo "::warning::Merged version PR is still pending and no promotion PR is open. Check the promote workflow."
-  fi
-else
-  echo "Release Please completed without opening or updating a version pull request."
-fi
-```
-
-Use `::warning::`, not a failure, for the missing-promotion case: the promote job runs on the same merge and may not have opened its PR yet.
+Add no reporting step after the action: the version PR is the output, and a run that opens nothing needs no summary. Keep `skip-github-release` in mind when a run looks idle: Release Please aborts by design while a merged version PR is still `autorelease: pending`, until the `main` release retags it (stage 5).
 
 ### 4. Promote from the merged version PR
 
@@ -235,7 +217,7 @@ Pass `--repo "$GITHUB_REPOSITORY"` to every `gh` call so the job needs no checko
 
 ### 6. Recover a failed release
 
-The release workflow pushes the tag before it builds. If it fails afterwards, the tag exists with no published release, and a re-run on `main` skips because the tag exists. Recover through the normal path: fix the workflow on the development branch, promote to `main` by PR, then `workflow_dispatch` with the existing tag so the build uses the original source. Rulesets that require PRs with no bypass actors, and a release environment limited to `main` and `v*` tags, are deliberate; do not weaken them or dispatch from another branch to get around them. The version PR stays `autorelease: pending` until the recovered release publishes, so Release Please keeps waiting; flip the label only after the release really exists.
+With the tag created in the publish job (section 7), a failed build leaves no tag and a re-run works. If an older workflow already pushed a tag before failing, recover through the normal path: fix on the development branch, promote to `main` by PR, then `workflow_dispatch` with the existing tag. Do not weaken rulesets or dispatch from another branch. The version PR stays `autorelease: pending` until the release really exists.
 
 ### 7. Prove each stage separately
 
@@ -244,3 +226,19 @@ The release workflow pushes the tag before it builds. If it fails afterwards, th
 3. `main` promotion → tag, release, assets, signatures/notarization.
 4. Published release → merged version PR relabelled `autorelease: tagged`; the next `develop` push opens or updates the next version PR.
 5. Verified assets → automated tap PR (`desktop-cli-release.md`).
+
+## 7. Build one release workflow
+
+One workflow handles every product in the repository; each product's job comes from its profile in `references/profiles/`. Only workflows with different triggers stay separate: PR CI, version PR (push to `develop`), promotion (version PR merged).
+
+Trigger: push to `main`, plus `workflow_dispatch` with an existing tag. Jobs, in order, each `needs:` the previous:
+
+1. **verify**: rerun CI for the exact `main` commit, or confirm its required checks passed.
+2. **prepare**: read the version from source, run the repo's version-sync check, compute `v<version>`. Stop with no error if that tag already exists.
+3. **build-<product>**: one job or matrix per product (CLI archives, app installers), from its profile.
+4. **verify-assets**: exact expected asset names, signatures, notarization, checksums.
+5. **publish**: create the tag and GitHub Release at the verified commit, only now. A failed build leaves no tag.
+6. **bookkeeping**: version-tool follow-up (Release Please: relabel merged version PRs `autorelease: pending` → `autorelease: tagged`, push events only, section 5).
+7. **homebrew**: for any macOS asset, open the PR against `luban-homebrew` (base `develop`; formula for a CLI, cask for a macOS app) after the release is public and verified. Linux Homebrew is not covered yet.
+
+Rules: jobs 6 and 7 are idempotent and re-runnable alone. A dispatch on an existing tag rebuilds that tag's source, never moves the tag, and never flips labels for a newer version PR. Pin actions to commit SHAs, use `RELEASE_BOT_TOKEN`, add `--repo "$GITHUB_REPOSITORY"` to every `gh` call, and give each job the least `permissions`. Before relying on a release-created tag, read `gh api repos/{owner}/{repo}/rulesets` for rules targeting tags; if `v*` is protected, report it and ask the owner to allow the release job.
