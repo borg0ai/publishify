@@ -121,3 +121,49 @@ Add or preserve a required check for the promotion/release path. It should verif
 6. CI fails before publishing if a required bump is absent, malformed, inconsistent, or already published. If no release is due, the configured policy must explicitly allow a no-release promotion.
 
 Report separately whether the bump was selected, generated, validated, merged, tagged, and published. A green version check does not prove that a release or its assets exist.
+
+## 6. Validate Release Please configuration and outcomes
+
+Apply this section when the repository uses Release Please. A parsed config or a green job does not prove a version PR was created or that history was recognized.
+
+### Preflight: tags and baseline
+
+- Identify the Release Please version the action bundles (check the action's pinned version, not the latest docs).
+- Compare configured tag options (`include-component-in-tag`, `tag-separator`, `include-v-in-tag`, and the manifest version) with the real tags and releases. For existing `vX.Y.Z` history, confirm manifest mode searches that exact tag form. Read the tag the action log says it searched before changing the manifest version or inventing a bootstrap value.
+
+### TOML extra-file selectors are version-specific
+
+- Release Please `GenericToml` does not use ordinary TOML-to-JSON semantics. In v17.3.0 it uses a tagged parser plus JSONPath pointers, so scalars are wrapped nodes.
+- Verified shape for v17.3.0: a Cargo.lock filter reads the wrapped name and the update target is the wrapped version node, `$.package[?(@.name.value=='package-name')].version`. Plain manifest fields end at the version node, for example `$.workspace.package.version`.
+- Confirm paths against the source or an executable updater for the exact bundled version before recommending them. A plain TOML parse check does not prove updater compatibility.
+- Run a focused updater check: apply the configured selectors to representative files and confirm every expected version field changes exactly once and the TOML stays valid. If the exact updater cannot run locally, mark the proof pending and require the hosted run's generated PR diff to show every configured version file updated.
+- References: [GenericToml updater v17.3.0](https://github.com/googleapis/release-please/blob/v17.3.0/src/updaters/generic-toml.ts), [manifest tag behavior](https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md#subsequent-versions), [array-filter issue](https://github.com/googleapis/release-please/issues/2455).
+
+### Classify the run outcome
+
+Treat job status, `prs_created`/PR outputs, log diagnostics, and actual PR state as separate signals. A successful job with no PR is not a version bump.
+
+| Observed | Classification |
+| --- | --- |
+| PR opened or updated | Version PR created/updated; verify its diff |
+| No releasable commits | Real no-op |
+| Log: `There are untagged, merged release PRs outstanding - aborting`, version PR merged on `develop`, policy defers tags/releases to `main`, promotion PR open | Expected wait: "waiting for production tag after promotion". Not a failure, not a published release |
+| Same log, but any of those conditions is false | Possible blocker; investigate |
+
+After the `main` promotion, verify the production release run created the expected tag. Only then does the outstanding-tag guard clear for the next cycle.
+
+### Workflow summary must match the diagnosis
+
+- Expected wait: state that no version PR was created, promotion is the pending stage, and no production tag/release exists yet. Do not print the generic "completed without opening or updating" line as a meaningful no-op.
+- Unexplained abort or missing expected PR: fail the job or surface an actionable diagnostic. Do not hide it behind a green job.
+
+### Promotion trigger
+
+Start promotion work from a merged version PR into the development branch that carries the release label, not from every push to `develop`. The job compares synchronized versions, then creates or reuses the `develop → main` PR idempotently. Ordinary feature merges must not allocate a promotion runner.
+
+### Verify each transition independently
+
+1. `develop` push → version PR.
+2. Merged version PR → promotion PR.
+3. `main` promotion → tag, release, assets, signatures/notarization.
+4. Release assets verified → automated tap PR (see `desktop-cli-release.md`).
